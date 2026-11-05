@@ -1,0 +1,458 @@
+{
+  "name": "TP Seminario - Registro automático de gastos compartidos",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyX",
+              "value": 15,
+              "unit": "minutes"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "q": "from:(mercadopago.com) subject:(pagaste OR transferiste OR \"tu pago\")"
+        },
+        "options": {},
+        "authentication": "serviceAccount"
+      },
+      "id": "a1f0c001-0001-4000-8000-000000000001",
+      "name": "Mail de Mercado Pago",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Paso determinístico: intenta sacar los datos del mail con expresiones regulares\nreturn $input.all().map(item => {\n  const j = item.json;\n  const texto = (j.text || j.snippet || '').replace(/\\s+/g, ' ');\n\n  const montoMatch = texto.match(/\\$\\s?([\\d.]+(?:,\\d{1,2})?)/);\n  const monto = montoMatch\n    ? parseFloat(montoMatch[1].replace(/\\./g, '').replace(',', '.'))\n    : null;\n\n  const comercioMatch = texto.match(/(?:pagaste|transferiste)[^a-zA-Z]+(?:a|en)\\s+([A-Z0-9][\\w .&-]{2,40}?)(?:\\s+por|\\s+el|\\.|$)/i);\n  const opMatch = texto.match(/operaci[oó]n\\s*(?:n[°º.]*|#)?\\s*(\\d{6,})/i);\n\n  return {\n    json: {\n      id_operacion: opMatch ? opMatch[1] : j.id,\n      fecha: new Date(j.date || Date.now()).toISOString().slice(0, 10),\n      monto,\n      comercio: comercioMatch ? comercioMatch[1].trim() : null,\n      asunto: j.subject || '',\n      texto: texto.slice(0, 2000),\n      metodo_extraccion: 'regex'\n    }\n  };\n});"
+      },
+      "id": "a1f0c001-0002-4000-8000-000000000002",
+      "name": "Extraer datos (regex)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.monto }}",
+              "rightValue": "",
+              "operator": {
+                "type": "number",
+                "operation": "exists",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "c2",
+              "leftValue": "={{ $json.comercio }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1f0c001-0003-4000-8000-000000000003",
+      "name": "¿Datos completos?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        480,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Sos un asistente que lee notificaciones de pago de Mercado Pago.\nDel siguiente texto extraé el monto pagado (número, sin símbolo, punto como decimal) y el nombre del comercio o persona a quien se pagó.\nRespondé SOLO con un JSON con esta forma: {\"monto\": number, \"comercio\": string}.\nSi no encontrás un dato, usá null.\n\nTexto:\n{{ $json.texto }}",
+        "hasOutputParser": false
+      },
+      "id": "a1f0c001-0004-4000-8000-000000000004",
+      "name": "Extraer datos con IA",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.4,
+      "position": [
+        720,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Une lo que devolvió la IA con los datos originales del mail\nconst base = $('Extraer datos (regex)').item.json;\nlet ia = {};\ntry {\n  ia = JSON.parse(($json.text || '').match(/\\{[\\s\\S]*\\}/)[0]);\n} catch (e) {\n  ia = {};\n}\nreturn {\n  json: {\n    ...base,\n    monto: base.monto ?? ia.monto ?? null,\n    comercio: base.comercio || ia.comercio || 'Sin identificar',\n    metodo_extraccion: 'ia'\n  }\n};"
+      },
+      "id": "a1f0c001-0005-4000-8000-000000000005",
+      "name": "Unir respuesta IA",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Clasificá este gasto en UNA de estas categorías: Supermercado, Servicios, Alquiler/Expensas, Limpieza/Hogar, Farmacia, Delivery/Comida, Transporte, Ocio, Otros.\nComercio: {{ $json.comercio }}\nMonto: {{ $json.monto }}\nAsunto del mail: {{ $json.asunto }}\nRespondé SOLO con un JSON: {\"categoria\": string}",
+        "hasOutputParser": false
+      },
+      "id": "a1f0c001-0006-4000-8000-000000000006",
+      "name": "Clasificar con IA",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.4,
+      "position": [
+        1440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Regla determinística: qué categorías se consideran gasto compartido de la casa\nconst COMPARTIDAS = ['Supermercado', 'Servicios', 'Alquiler/Expensas', 'Limpieza/Hogar'];\nconst gasto = $('Normalizar gasto').item.json;\n\nlet categoria = 'Otros';\ntry {\n  categoria = JSON.parse(($json.text || '').match(/\\{[\\s\\S]*\\}/)[0]).categoria || 'Otros';\n} catch (e) {}\n\nreturn {\n  json: {\n    id_operacion: gasto.id_operacion,\n    fecha: gasto.fecha,\n    comercio: gasto.comercio,\n    monto: gasto.monto,\n    categoria,\n    compartido: COMPARTIDAS.includes(categoria),\n    monto_por_persona: gasto.monto ? Math.round((gasto.monto / 2) * 100) / 100 : null,\n    metodo_extraccion: gasto.metodo_extraccion,\n    cargado_el: new Date().toISOString()\n  }\n};"
+      },
+      "id": "a1f0c001-0007-4000-8000-000000000007",
+      "name": "Armar fila",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c3",
+              "leftValue": "={{ $json.compartido }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1f0c001-0008-4000-8000-000000000008",
+      "name": "¿Es gasto compartido?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1920,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "mode": "url",
+          "value": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "registro_gastos"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "id_operacion"
+          ]
+        },
+        "options": {},
+        "authentication": "serviceAccount"
+      },
+      "id": "a1f0c001-0009-4000-8000-000000000009",
+      "name": "Guardar en Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        2160,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://ntfy/gastos-casa",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Title",
+              "value": "Nuevo gasto compartido"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "text/plain",
+        "body": "={{ $json.comercio }}: ${{ $json.monto }} ({{ $json.categoria }}) - a cada uno le toca ${{ $json.monto_por_persona }}",
+        "options": {}
+      },
+      "id": "a1f0c001-0010-4000-8000-000000000010",
+      "name": "Avisar al celular (ntfy)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2400,
+        200
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "a1f0c001-0011-4000-8000-000000000011",
+      "name": "Gasto personal (no se carga)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2160,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-4o-mini"
+        },
+        "options": {
+          "temperature": 0,
+          "responseFormat": "json_object"
+        }
+      },
+      "id": "a1f0c001-0012-4000-8000-000000000012",
+      "name": "Modelo ChatGPT (OpenAI) - extracción",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        720,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-4o-mini"
+        },
+        "options": {
+          "temperature": 0,
+          "responseFormat": "json_object"
+        }
+      },
+      "id": "a1f0c001-0013-4000-8000-000000000013",
+      "name": "Modelo ChatGPT (OpenAI) - clasificación",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        1440,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Punto común: sea por regex o por IA, el gasto sale con el mismo formato\nreturn {\n  json: {\n    id_operacion: String($json.id_operacion),\n    fecha: $json.fecha,\n    comercio: $json.comercio,\n    monto: Number($json.monto) || null,\n    asunto: $json.asunto,\n    metodo_extraccion: $json.metodo_extraccion\n  }\n};"
+      },
+      "id": "a1f0c001-0014-4000-8000-000000000014",
+      "name": "Normalizar gasto",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Mail de Mercado Pago": {
+      "main": [
+        [
+          {
+            "node": "Extraer datos (regex)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extraer datos (regex)": {
+      "main": [
+        [
+          {
+            "node": "¿Datos completos?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Datos completos?": {
+      "main": [
+        [
+          {
+            "node": "Normalizar gasto",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Extraer datos con IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extraer datos con IA": {
+      "main": [
+        [
+          {
+            "node": "Unir respuesta IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unir respuesta IA": {
+      "main": [
+        [
+          {
+            "node": "Normalizar gasto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clasificar con IA": {
+      "main": [
+        [
+          {
+            "node": "Armar fila",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Armar fila": {
+      "main": [
+        [
+          {
+            "node": "¿Es gasto compartido?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Es gasto compartido?": {
+      "main": [
+        [
+          {
+            "node": "Guardar en Google Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Gasto personal (no se carga)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Guardar en Google Sheets": {
+      "main": [
+        [
+          {
+            "node": "Avisar al celular (ntfy)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalizar gasto": {
+      "main": [
+        [
+          {
+            "node": "Clasificar con IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Modelo ChatGPT (OpenAI) - extracción": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Extraer datos con IA",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Modelo ChatGPT (OpenAI) - clasificación": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Clasificar con IA",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
